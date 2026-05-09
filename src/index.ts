@@ -343,6 +343,19 @@ async function main(): Promise<void> {
 		const app = express();
 		app.use(express.json());
 
+		// CORS headers for all requests
+		app.use((_req: Request, res: Response, next) => {
+			res.header('Access-Control-Allow-Origin', '*');
+			res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+			res.header('Access-Control-Allow-Headers', 'Content-Type, Accept, Mcp-Session-Id, Authorization');
+			res.header('Access-Control-Expose-Headers', 'Mcp-Session-Id');
+			if (_req.method === 'OPTIONS') {
+				res.status(204).send();
+				return;
+			}
+			next();
+		});
+
 		app.get('/callback', async (req: Request, res: Response) => {
 			const code = req.query.code as string | undefined;
 			if (!code) {
@@ -364,6 +377,117 @@ async function main(): Promise<void> {
 			res.json({ status: 'ok', authenticated: Boolean(db.getTokens()) });
 		});
 
+		// OAuth discovery endpoints for Claude.ai compatibility
+		app.get('/.well-known/oauth-authorization-server', (_req: Request, res: Response) => {
+			const baseUrl = config.redirectUri.replace('/callback', '');
+			res.json({
+				issuer: baseUrl,
+				authorization_endpoint: `${baseUrl}/oauth/authorize`,
+				token_endpoint: `${baseUrl}/oauth/token`,
+				registration_endpoint: `${baseUrl}/register`,
+				response_types_supported: ['code'],
+				grant_types_supported: ['authorization_code', 'refresh_token'],
+				code_challenge_methods_supported: ['S256'],
+				token_endpoint_auth_methods_supported: ['client_secret_post'],
+			});
+		});
+
+		app.get('/.well-known/oauth-protected-resource', (_req: Request, res: Response) => {
+			const baseUrl = config.redirectUri.replace('/callback', '');
+			res.json({
+				resource: baseUrl,
+				authorization_servers: [baseUrl],
+				bearer_methods_supported: ['header'],
+			});
+		});
+
+		app.get('/.well-known/oauth-protected-resource/mcp', (_req: Request, res: Response) => {
+			const baseUrl = config.redirectUri.replace('/callback', '');
+			res.json({
+				resource: `${baseUrl}/mcp`,
+				authorization_servers: [baseUrl],
+				bearer_methods_supported: ['header'],
+			});
+		});
+
+		// Dynamic client registration endpoint
+		app.post('/register', (req: Request, res: Response) => {
+			const clientId = crypto.randomUUID();
+			res.status(201).json({
+				client_id: clientId,
+				client_name: req.body?.client_name ?? 'claude-connector',
+				redirect_uris: req.body?.redirect_uris ?? [],
+				grant_types: ['authorization_code', 'refresh_token'],
+				response_types: ['code'],
+				token_endpoint_auth_method: 'client_secret_post',
+				client_secret: crypto.randomUUID(),
+			});
+		});
+
+		// OAuth authorize endpoint — redirects to Whoop OAuth
+		app.get('/oauth/authorize', (req: Request, res: Response) => {
+			const scopes = ['read:profile', 'read:body_measurement', 'read:cycles', 'read:recovery', 'read:sleep', 'read:workout', 'offline'];
+			const state = (req.query.state as string) ?? crypto.randomUUID();
+
+			const params = new URLSearchParams({
+				client_id: config.clientId,
+				redirect_uri: config.redirectUri,
+				response_type: 'code',
+				scope: scopes.join(' '),
+				state,
+			});
+			res.redirect(`https://api.prod.whoop.com/oauth/oauth2/auth?${params}`);
+		});
+
+		// OAuth token endpoint — proxies to Whoop or returns stored tokens
+		app.post('/oauth/token', async (req: Request, res: Response) => {
+			try {
+				const { grant_type, code, refresh_token: reqRefreshToken } = req.body;
+
+				if (grant_type === 'authorization_code' && code) {
+					const tokens = await client.exchangeCodeForTokens(code);
+					db.saveTokens(tokens);
+					sync.syncDays(90).catch(() => {});
+					res.json({
+						access_token: tokens.access_token,
+						token_type: 'Bearer',
+						expires_in: Math.floor((tokens.expires_at - Date.now()) / 1000),
+						refresh_token: tokens.refresh_token,
+					});
+				} else if (grant_type === 'refresh_token' && reqRefreshToken) {
+					const existingTokens = db.getTokens();
+					if (existingTokens) {
+						res.json({
+							access_token: existingTokens.access_token,
+							token_type: 'Bearer',
+							expires_in: Math.floor((existingTokens.expires_at - Date.now()) / 1000),
+							refresh_token: existingTokens.refresh_token,
+						});
+					} else {
+						res.status(400).json({ error: 'invalid_grant' });
+					}
+				} else {
+					res.status(400).json({ error: 'unsupported_grant_type' });
+				}
+			} catch {
+				res.status(500).json({ error: 'server_error' });
+			}
+		});
+
+		// Normalize Accept header before MCP handler
+		app.use('/mcp', (req: Request, _res: Response, next) => {
+			if (req.method === 'POST') {
+				const accept = req.headers.accept ?? '';
+				if (!accept.includes('text/event-stream')) {
+					req.headers.accept = 'application/json, text/event-stream';
+				}
+				if (!req.headers['content-type']?.includes('application/json')) {
+					req.headers['content-type'] = 'application/json';
+				}
+			}
+			next();
+		});
+
 		app.all('/mcp', async (req: Request, res: Response) => {
 			const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
@@ -372,6 +496,19 @@ async function main(): Promise<void> {
 				await session.transport.close();
 				transports.delete(sessionId);
 				res.status(200).send('Session closed');
+				return;
+			}
+
+			if (req.method === 'GET') {
+				// Handle GET for SSE streaming (some clients use this)
+				const accept = req.headers.accept ?? '';
+				if (accept.includes('text/event-stream') && sessionId && transports.has(sessionId)) {
+					const session = transports.get(sessionId)!;
+					session.lastAccess = Date.now();
+					await session.transport.handleRequest(req, res);
+					return;
+				}
+				res.status(405).send('Method not allowed');
 				return;
 			}
 
@@ -394,7 +531,13 @@ async function main(): Promise<void> {
 					await server.connect(transport);
 				}
 
-				await transport.handleRequest(req, res);
+				try {
+					await transport.handleRequest(req, res);
+				} catch (error) {
+					if (!res.headersSent) {
+						res.status(500).json({ error: 'Internal server error', message: String(error) });
+					}
+				}
 				return;
 			}
 
