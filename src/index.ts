@@ -518,13 +518,10 @@ async function main(): Promise<void> {
 			}
 		});
 
-		// Normalize Accept header before MCP handler
+		// Normalize headers before MCP handler
 		app.use('/mcp', (req: Request, _res: Response, next) => {
 			if (req.method === 'POST') {
-				const accept = req.headers.accept ?? '';
-				if (!accept.includes('text/event-stream')) {
-					req.headers.accept = 'application/json, text/event-stream';
-				}
+				req.headers.accept = 'text/event-stream';
 				if (!req.headers['content-type']?.includes('application/json')) {
 					req.headers['content-type'] = 'application/json';
 				}
