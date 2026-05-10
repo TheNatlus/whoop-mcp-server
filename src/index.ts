@@ -362,13 +362,12 @@ async function main(): Promise<void> {
 				res.status(400).send('Missing authorization code');
 				return;
 			}
-
 			try {
 				const tokens = await client.exchangeCodeForTokens(code);
 				db.saveTokens(tokens);
 				sync.syncDays(90).catch(() => {});
 				res.send('Authorization successful! You can close this window.');
-			} catch {
+			} catch (error) {
 				res.status(500).send(`Authorization failed: ${error instanceof Error ? error.message : String(error)}`);
 			}
 		});
