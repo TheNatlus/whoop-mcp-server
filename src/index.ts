@@ -576,6 +576,12 @@ async function main(): Promise<void> {
 				}
 
 				try {
+					console.log('MCP request body:', JSON.stringify(req.body));
+					console.log('MCP request headers:', JSON.stringify({
+						'content-type': req.headers['content-type'],
+						'accept': req.headers.accept,
+						'mcp-session-id': req.headers['mcp-session-id'],
+					}));
 					await transport.handleRequest(req, res);
 				} catch (error) {
 					if (!res.headersSent) {
