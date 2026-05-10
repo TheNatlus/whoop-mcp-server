@@ -369,7 +369,7 @@ async function main(): Promise<void> {
 				sync.syncDays(90).catch(() => {});
 				res.send('Authorization successful! You can close this window.');
 			} catch {
-				res.status(500).send('Authorization failed. Please try again.');
+				res.status(500).send(`Authorization failed: ${error instanceof Error ? error.message : String(error)}`);
 			}
 		});
 
