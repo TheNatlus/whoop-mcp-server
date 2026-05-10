@@ -564,12 +564,24 @@ async function main(): Promise<void> {
 					session.lastAccess = Date.now();
 					transport = session.transport;
 				} else {
-					transport = new StreamableHTTPServerTransport({
-						sessionIdGenerator: () => crypto.randomUUID(),
-						onsessioninitialized: newSessionId => {
-							transports.set(newSessionId, { transport, lastAccess: Date.now() });
-						},
-					});
+					try {
+						transport = new StreamableHTTPServerTransport({
+							sessionIdGenerator: () => crypto.randomUUID(),
+							enableJsonResponse: true,
+							onsessioninitialized: newSessionId => {
+								transports.set(newSessionId, { transport, lastAccess: Date.now() });
+							},
+						});
+					} catch (initError) {
+						console.log('Transport init error:', initError);
+						// Fallback without enableJsonResponse
+						transport = new StreamableHTTPServerTransport({
+							sessionIdGenerator: () => crypto.randomUUID(),
+							onsessioninitialized: newSessionId => {
+								transports.set(newSessionId, { transport, lastAccess: Date.now() });
+							},
+						});
+					}
 
 					const server = createMcpServer();
 					await server.connect(transport);
@@ -581,9 +593,12 @@ async function main(): Promise<void> {
 						'content-type': req.headers['content-type'],
 						'accept': req.headers.accept,
 						'mcp-session-id': req.headers['mcp-session-id'],
+						'authorization': req.headers.authorization ? 'Bearer ***' : 'none',
 					}));
 					await transport.handleRequest(req, res);
+					console.log('MCP response status:', res.statusCode);
 				} catch (error) {
+					console.log('MCP transport error:', String(error));
 					if (!res.headersSent) {
 						res.status(500).json({ error: 'Internal server error', message: String(error) });
 					}
