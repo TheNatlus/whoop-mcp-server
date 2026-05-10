@@ -577,7 +577,7 @@ async function main(): Promise<void> {
 						'mcp-session-id': req.headers['mcp-session-id'],
 						'authorization': req.headers.authorization ? 'Bearer ***' : 'none',
 					}));
-					await transport.handleRequest(req, res);
+					await transport.handleRequest(req, res, req.body);
 					console.log('MCP response status:', res.statusCode);
 				} catch (error) {
 					console.log('MCP transport error:', String(error));
