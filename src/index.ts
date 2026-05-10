@@ -342,6 +342,7 @@ async function main(): Promise<void> {
 	} else {
 		const app = express();
 		app.use(express.json());
+		app.use(express.urlencoded({ extended: true }));
 
 		// CORS headers for all requests
 		app.use((_req: Request, res: Response, next) => {
